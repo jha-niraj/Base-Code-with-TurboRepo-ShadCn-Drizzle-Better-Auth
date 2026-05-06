@@ -8,30 +8,29 @@ import {
     Shield, Loader2, Mail, Lock, KeyRound, Eye, EyeOff
 } from "lucide-react"
 import { motion } from "framer-motion"
-import { 
-    Tabs, TabsList, TabsTrigger, TabsContent 
+import {
+    Tabs, TabsList, TabsTrigger, TabsContent
 } from "@repo/ui/components/ui/tabs"
 import { Label } from "@repo/ui/components/ui/label"
 import { Input } from "@repo/ui/components/ui/input"
 
 export default function AdminSignInPage() {
     const router = useRouter()
-    const { data: session, status } = useSession()
+    const { data: session, isPending } = useSession()
     const [isLoading, setIsLoading] = useState(false)
     const [authMode, setAuthMode] = useState<"credentials" | "accessCode">("credentials")
     const [showPassword, setShowPassword] = useState(false)
 
-    // Form state
     const [email, setEmail] = useState("")
     const [password, setPassword] = useState("")
     const [accessCode, setAccessCode] = useState("")
 
     // Redirect if already authenticated
     useEffect(() => {
-        if (status === "authenticated" && session) {
+        if (!isPending && session) {
             router.push("/dashboard")
         }
-    }, [session, status, router])
+    }, [session, isPending, router])
 
     const handleCredentialsSignIn = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -46,10 +45,11 @@ export default function AdminSignInPage() {
         setIsLoading(true)
 
         try {
-            const result = await signIn("credentials", {
+            const result = await signIn.email({
                 email,
                 password,
-                redirect: false,
+                callbackURL: "/dashboard",
+                fetchOptions: { throw: false },
             })
 
             if (result?.error) {
@@ -63,7 +63,7 @@ export default function AdminSignInPage() {
                 router.push("/dashboard")
             }
         } catch (error) {
-            console.log("Error occurred while signing; " + error);
+            console.error("Error occurred while signing in:", error)
             toast.error("Sign in failed", {
                 description: "An unexpected error occurred"
             })
@@ -85,8 +85,7 @@ export default function AdminSignInPage() {
         setIsLoading(true)
 
         try {
-            // Call API to verify access code
-            const response = await fetch("/api/auth/verify-access-code", {
+            const response = await fetch("/api/auth/verifycode", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ email, accessCode })
@@ -98,12 +97,12 @@ export default function AdminSignInPage() {
                 throw new Error(data.message || "Invalid access code")
             }
 
-            // If valid, sign in with credentials
-            const result = await signIn("credentials", {
+            // Sign in with the access code as a temporary password
+            const result = await signIn.email({
                 email,
-                password: accessCode, // Use access code as temporary password
-                isAccessCode: true,
-                redirect: false,
+                password: accessCode,
+                callbackURL: "/dashboard",
+                fetchOptions: { throw: false },
             })
 
             if (result?.error) {
@@ -117,7 +116,7 @@ export default function AdminSignInPage() {
                 router.push("/dashboard")
             }
         } catch (error) {
-            console.log("Error occurred while verification: " + error);
+            console.error("Error occurred during verification:", error)
             toast.error("Verification failed", {
                 description: "Invalid or expired access code"
             })
@@ -126,7 +125,7 @@ export default function AdminSignInPage() {
         }
     }
 
-    if (status === "loading") {
+    if (isPending) {
         return (
             <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 flex items-center justify-center">
                 <Loader2 className="w-8 h-8 animate-spin text-neutral-400" />
@@ -206,29 +205,27 @@ export default function AdminSignInPage() {
                                     disabled={isLoading}
                                     className="cursor-pointer w-full py-3 px-4 bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 text-white font-medium rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-red-500/20"
                                 >
-                                    {
-                                        isLoading ? (
-                                            <>
-                                                <Loader2 className="w-5 h-5 animate-spin" />
-                                                <span>Signing in...</span>
-                                            </>
-                                        ) : (
-                                            <span>Sign In</span>
-                                        )
-                                    }
+                                    {isLoading ? (
+                                        <>
+                                            <Loader2 className="w-5 h-5 animate-spin" />
+                                            <span>Signing in...</span>
+                                        </>
+                                    ) : (
+                                        <span>Sign In</span>
+                                    )}
                                 </button>
                             </form>
                         </TabsContent>
                         <TabsContent value="accessCode">
                             <form onSubmit={handleAccessCodeSignIn} className="p-8 space-y-6 w-full max-w-lg mx-auto">
                                 <div>
-                                    <Label htmlFor="email" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+                                    <Label htmlFor="emailCode" className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-2">
                                         Email Address
                                     </Label>
                                     <div className="relative">
                                         <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-400" />
                                         <Input
-                                            id="email"
+                                            id="emailCode"
                                             type="email"
                                             value={email}
                                             onChange={(e) => setEmail(e.target.value)}
@@ -261,16 +258,14 @@ export default function AdminSignInPage() {
                                     disabled={isLoading}
                                     className="w-full py-3 px-4 bg-gradient-to-r from-red-500 to-orange-500 hover:from-red-600 hover:to-orange-600 text-white font-medium rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-red-500/20"
                                 >
-                                    {
-                                        isLoading ? (
-                                            <>
-                                                <Loader2 className="w-5 h-5 animate-spin" />
-                                                <span>Signing in...</span>
-                                            </>
-                                        ) : (
-                                            <span>Sign In</span>
-                                        )
-                                    }
+                                    {isLoading ? (
+                                        <>
+                                            <Loader2 className="w-5 h-5 animate-spin" />
+                                            <span>Signing in...</span>
+                                        </>
+                                    ) : (
+                                        <span>Sign In</span>
+                                    )}
                                 </button>
                             </form>
                         </TabsContent>

@@ -8,15 +8,13 @@
         "build": "next build",
         "start": "next start",
         "lint": "eslint --max-warnings 0",
-        "check-types": "next typegen && tsc --noEmit"
+        "check-types": "tsc --noEmit"
     },
     "dependencies": {
-        "@prisma/client": "6.14.0",
         "@repo/auth": "workspace:*",
-        "@repo/prisma": "workspace:*",
+        "@repo/db": "workspace:*",
         "@repo/ui": "workspace:*",
         "@tailwindcss/postcss": "^4.1.18",
-        "bcryptjs": "^3.0.3",
         "framer-motion": "^12.23.26",
         "lucide-react": "^0.562.0",
         "next": "15.4.10",

@@ -1,4 +1,8 @@
-// Middleware exports - Edge Runtime compatible
-// These exports do NOT include @repo/auth/client which contains dynamic code evaluation
-export { withAuth } from 'next-auth/middleware';
-export type { NextRequestWithAuth } from 'next-auth/middleware';
+import type { NextRequest } from 'next/server'
+import { auth } from './auth'
+
+// Helper to get the session in Next.js middleware (Edge Runtime compatible).
+// Note: Better Auth's full server SDK is not edge-compatible; use this lightweight check.
+export async function authMiddleware(request: NextRequest) {
+    return auth.api.getSession({ headers: request.headers })
+}

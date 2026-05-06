@@ -1,8 +1,17 @@
 "use server"
 
-import { prisma } from "@repo/prisma"
-import { getServerSession, authOptions } from "@repo/auth"
+import { db } from "@repo/db"
+import {
+    user,
+    account,
+    adminAccess,
+    adminInvitation,
+    adminAuditLog,
+} from "@repo/db/schema"
+import { auth } from "@repo/auth"
+import { headers } from "next/headers"
 import { revalidatePath } from "next/cache"
+import { and, count, desc, eq, gte } from "@repo/db"
 import bcrypt from "bcryptjs"
 
 // Types
@@ -19,9 +28,8 @@ interface AdminResponse<T = unknown> {
     error?: string
 }
 
-// Generate a unique access code
 function generateAccessCode(): string {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Removed ambiguous chars
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     let code = "ADMIN-"
     for (let i = 0; i < 8; i++) {
         code += chars.charAt(Math.floor(Math.random() * chars.length))
@@ -29,29 +37,30 @@ function generateAccessCode(): string {
     return code
 }
 
+async function getSession() {
+    return auth.api.getSession({ headers: await headers() })
+}
+
 // Check if current user is admin
-export async function checkAdminAccess(): Promise<AdminResponse<{ isAdmin: boolean; adminAccess: any }>> {
+export async function checkAdminAccess(): Promise<AdminResponse<{ isAdmin: boolean; adminAccess: typeof adminAccess.$inferSelect }>> {
     try {
-        const session = await getServerSession(authOptions)
-        
+        const session = await getSession()
+
         if (!session?.user?.id) {
             return { success: false, error: "Not authenticated" }
         }
 
-        const adminAccess = await prisma.adminAccess.findUnique({
-            where: { userId: session.user.id }
+        const adminAccessRecord = await db.query.adminAccess.findFirst({
+            where: (a, { eq }) => eq(a.userId, session.user.id),
         })
 
-        if (!adminAccess || adminAccess.status !== "ACTIVE") {
+        if (!adminAccessRecord || adminAccessRecord.status !== "ACTIVE") {
             return { success: false, error: "Not authorized" }
         }
 
-        return { 
-            success: true, 
-            data: { 
-                isAdmin: true, 
-                adminAccess 
-            } 
+        return {
+            success: true,
+            data: { isAdmin: true, adminAccess: adminAccessRecord },
         }
     } catch (error) {
         console.error("Admin access check error:", error)
@@ -62,43 +71,35 @@ export async function checkAdminAccess(): Promise<AdminResponse<{ isAdmin: boole
 // Get current admin info
 export async function getCurrentAdmin(): Promise<AdminResponse<any>> {
     try {
-        const session = await getServerSession(authOptions)
-        
+        const session = await getSession()
+
         if (!session?.user?.id) {
             return { success: false, error: "Not authenticated" }
         }
 
-        const adminAccess = await prisma.adminAccess.findUnique({
-            where: {
-                userId: session.user.id 
-            },
-            select: {
-                permissions: true
-            }
+        const adminAccessRecord = await db.query.adminAccess.findFirst({
+            where: (a, { eq }) => eq(a.userId, session.user.id),
         })
 
-        if (!adminAccess) {
+        if (!adminAccessRecord) {
             return { success: false, error: "Not an admin" }
         }
 
-        const user = await prisma.user.findUnique({
-            where: { 
-                id: session.user.id 
-            },
-            select: { 
-                id: true, 
-                name: true, 
-                email: true, 
-                image: true 
-            }
+        const userRecord = await db.query.user.findFirst({
+            where: (u, { eq }) => eq(u.id, session.user.id),
+            columns: { id: true, name: true, email: true, image: true },
         })
 
-        return { 
-            success: true, 
-            data: { 
-                ...adminAccess, 
-                user: user 
-            } 
+        return {
+            success: true,
+            data: {
+                ...adminAccessRecord,
+                role: adminAccessRecord.adminRole,
+                name: userRecord?.name ?? null,
+                email: userRecord?.email ?? '',
+                image: userRecord?.image ?? null,
+                user: userRecord,
+            },
         }
     } catch (error) {
         console.error("Get current admin error:", error)
@@ -112,25 +113,31 @@ export async function getAdminUsers(): Promise<AdminResponse<any[]>> {
         const { success, error } = await checkAdminAccess()
         if (!success) return { success: false, error }
 
-        const admins = await prisma.adminAccess.findMany({
-            include: {
+        const admins = await db.query.adminAccess.findMany({
+            with: {
                 invitations: {
-                    take: 5,
-                    orderBy: { createdAt: "desc" }
-                }
+                    limit: 5,
+                    orderBy: (inv, { desc }) => [desc(inv.createdAt)],
+                },
             },
-            orderBy: { createdAt: "desc" }
+            orderBy: [desc(adminAccess.createdAt)],
         })
 
-        // Get user details for each admin
         const adminWithUsers = await Promise.all(
             admins.map(async (admin) => {
-                const user = await prisma.user.findUnique({
-                    where: { id: admin.userId },
-                    select: { id: true, name: true, email: true, image: true }
+                const userRecord = await db.query.user.findFirst({
+                    where: (u, { eq }) => eq(u.id, admin.userId),
+                    columns: { id: true, name: true, email: true, image: true },
                 })
-                return { ...admin, user }
-            })
+                return {
+                    ...admin,
+                    role: admin.adminRole,
+                    name: userRecord?.name ?? null,
+                    email: userRecord?.email ?? '',
+                    image: userRecord?.image ?? null,
+                    user: userRecord,
+                }
+            }),
         )
 
         return { success: true, data: adminWithUsers }
@@ -146,21 +153,20 @@ export async function createAdminInvitation(input: CreateInvitationInput): Promi
         const accessCheck = await checkAdminAccess()
         if (!accessCheck.success) return { success: false, error: accessCheck.error }
 
-        const adminAccess = accessCheck.data?.adminAccess
-        
-        // Only SUPER_ADMIN can create invitations
-        if (adminAccess.adminRole !== "SUPER_ADMIN") {
+        const adminAccessRecord = accessCheck.data?.adminAccess
+
+        if (adminAccessRecord?.adminRole !== "SUPER_ADMIN") {
             return { success: false, error: "Only super admins can create invitations" }
         }
 
         // Check if email already has admin access
-        const existingUser = await prisma.user.findUnique({
-            where: { email: input.email }
+        const existingUser = await db.query.user.findFirst({
+            where: (u, { eq }) => eq(u.email, input.email),
         })
 
         if (existingUser) {
-            const existingAdmin = await prisma.adminAccess.findUnique({
-                where: { userId: existingUser.id }
+            const existingAdmin = await db.query.adminAccess.findFirst({
+                where: (a, { eq }) => eq(a.userId, existingUser.id),
             })
             if (existingAdmin) {
                 return { success: false, error: "User already has admin access" }
@@ -168,40 +174,37 @@ export async function createAdminInvitation(input: CreateInvitationInput): Promi
         }
 
         // Check for existing pending invitation
-        const existingInvite = await prisma.adminInvitation.findFirst({
-            where: {
-                email: input.email,
-                status: "PENDING"
-            }
+        const existingInvite = await db.query.adminInvitation.findFirst({
+            where: (inv, { and, eq }) =>
+                and(eq(inv.email, input.email), eq(inv.status, "PENDING")),
         })
 
         if (existingInvite) {
             return { success: false, error: "Pending invitation already exists for this email" }
         }
 
-        // Create invitation
-        const invitation = await prisma.adminInvitation.create({
-            data: {
+        const [invitation] = await db
+            .insert(adminInvitation)
+            .values({
                 email: input.email,
                 name: input.name,
                 code: generateAccessCode(),
                 adminRole: input.adminRole,
-                permissions: input.permissions || {},
-                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-                createdById: adminAccess.id
-            }
-        })
+                permissions: input.permissions ?? {},
+                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+                createdById: adminAccessRecord!.id,
+                createdAt: new Date(),
+            })
+            .returning()
 
-        // Log the action
-        await prisma.adminAuditLog.create({
-            data: {
-                adminId: adminAccess.id,
-                action: "CREATE",
-                module: "admin_management",
-                resourceType: "AdminInvitation",
-                resourceId: invitation.id,
-                description: `Created invitation for ${input.email} with role ${input.adminRole}`
-            }
+        await db.insert(adminAuditLog).values({
+            adminId: adminAccessRecord!.id,
+            action: "CREATE",
+            module: "admin_management",
+            resourceType: "AdminInvitation",
+            resourceId: invitation!.id,
+            description: `Created invitation for ${input.email} with role ${input.adminRole}`,
+            createdAt: new Date(),
         })
 
         revalidatePath("/admins")
@@ -217,94 +220,102 @@ export async function createAdminInvitation(input: CreateInvitationInput): Promi
 // Verify access code and create admin
 export async function verifyAccessCode(email: string, accessCode: string): Promise<AdminResponse<any>> {
     try {
-        // Find the invitation
-        const invitation = await prisma.adminInvitation.findFirst({
-            where: {
-                email: email.toLowerCase(),
-                code: accessCode.toUpperCase(),
-                status: "PENDING"
-            }
+        const normalizedEmail = email.toLowerCase()
+        const normalizedCode = accessCode.toUpperCase()
+
+        const invitation = await db.query.adminInvitation.findFirst({
+            where: (inv, { and, eq }) =>
+                and(
+                    eq(inv.email, normalizedEmail),
+                    eq(inv.code, normalizedCode),
+                    eq(inv.status, "PENDING"),
+                ),
         })
 
         if (!invitation) {
             return { success: false, error: "Invalid access code" }
         }
 
-        // Check if expired
         if (new Date() > invitation.expiresAt) {
-            await prisma.adminInvitation.update({
-                where: { id: invitation.id },
-                data: { status: "EXPIRED" }
-            })
+            await db
+                .update(adminInvitation)
+                .set({ status: "EXPIRED" })
+                .where(eq(adminInvitation.id, invitation.id))
             return { success: false, error: "Access code has expired" }
         }
 
-        // Find or create user
-        let user = await prisma.user.findUnique({
-            where: { email: email.toLowerCase() }
+        const hashedPassword = await bcrypt.hash(normalizedCode, 10)
+
+        let existingUser = await db.query.user.findFirst({
+            where: (u, { eq }) => eq(u.email, normalizedEmail),
         })
 
-        if (!user) {
-            // Create user with temporary password (access code)
-            const tempPassword = await bcrypt.hash(accessCode, 10)
-            user = await prisma.user.create({
-                data: {
-                    email: email.toLowerCase(),
-                    name: invitation.name || email.split("@")[0],
-                    hashedPassword: tempPassword,
+        if (!existingUser) {
+            const [newUser] = await db
+                .insert(user)
+                .values({
+                    id: crypto.randomUUID(),
+                    email: normalizedEmail,
+                    name: invitation.name || normalizedEmail.split("@")[0]!,
                     emailVerified: true,
-                    role: "Admin"
-                }
+                    role: "ADMIN",
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                })
+                .returning()
+
+            existingUser = newUser!
+
+            await db.insert(account).values({
+                id: crypto.randomUUID(),
+                accountId: existingUser.id,
+                providerId: "credential",
+                userId: existingUser.id,
+                password: hashedPassword,
+                createdAt: new Date(),
+                updatedAt: new Date(),
             })
         }
 
-        // Check if admin access already exists
-        let adminAccessRecord = await prisma.adminAccess.findUnique({
-            where: { userId: user.id }
+        let adminAccessRecord = await db.query.adminAccess.findFirst({
+            where: (a, { eq }) => eq(a.userId, existingUser!.id),
         })
 
         if (!adminAccessRecord) {
-            // Create admin access
-            adminAccessRecord = await prisma.adminAccess.create({
-                data: {
-                    userId: user.id,
+            const [newAccess] = await db
+                .insert(adminAccess)
+                .values({
+                    userId: existingUser.id,
                     adminRole: invitation.adminRole,
-                    permissions: invitation.permissions || {},
+                    permissions: invitation.permissions ?? {},
                     status: "ACTIVE",
-                    inviteCode: accessCode
-                }
-            })
+                    inviteCode: normalizedCode,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                })
+                .returning()
+
+            adminAccessRecord = newAccess!
         }
 
-        // Update invitation status
-        await prisma.adminInvitation.update({
-            where: { id: invitation.id },
-            data: {
-                status: "USED",
-                usedBy: user.id,
-                usedAt: new Date()
-            }
+        await db
+            .update(adminInvitation)
+            .set({ status: "USED", usedBy: existingUser.id, usedAt: new Date() })
+            .where(eq(adminInvitation.id, invitation.id))
+
+        await db.insert(adminAuditLog).values({
+            adminId: adminAccessRecord.id,
+            action: "LOGIN",
+            module: "admin_management",
+            resourceType: "AdminAccess",
+            resourceId: adminAccessRecord.id,
+            description: `New admin ${email} activated via access code`,
+            createdAt: new Date(),
         })
 
-        // Create audit log
-        await prisma.adminAuditLog.create({
-            data: {
-                adminId: adminAccessRecord.id,
-                action: "LOGIN",
-                module: "admin_management",
-                resourceType: "AdminAccess",
-                resourceId: adminAccessRecord.id,
-                description: `New admin ${email} activated via access code`
-            }
-        })
-
-        return { 
-            success: true, 
-            data: { 
-                user, 
-                adminAccess: adminAccessRecord,
-                needsPasswordSetup: true 
-            } 
+        return {
+            success: true,
+            data: { user: existingUser, adminAccess: adminAccessRecord, needsPasswordSetup: true },
         }
     } catch (error) {
         console.error("Verify access code error:", error)
@@ -318,11 +329,9 @@ export async function getPendingInvitations(): Promise<AdminResponse<any[]>> {
         const { success, error } = await checkAdminAccess()
         if (!success) return { success: false, error }
 
-        const invitations = await prisma.adminInvitation.findMany({
-            where: {
-                status: "PENDING"
-            },
-            orderBy: { createdAt: "desc" }
+        const invitations = await db.query.adminInvitation.findMany({
+            where: (inv, { eq }) => eq(inv.status, "PENDING"),
+            orderBy: [desc(adminInvitation.createdAt)],
         })
 
         return { success: true, data: invitations }
@@ -338,26 +347,25 @@ export async function revokeInvitation(invitationId: string): Promise<AdminRespo
         const accessCheck = await checkAdminAccess()
         if (!accessCheck.success) return { success: false, error: accessCheck.error }
 
-        const adminAccess = accessCheck.data?.adminAccess
-        
-        if (adminAccess.adminRole !== "SUPER_ADMIN") {
+        const adminAccessRecord = accessCheck.data?.adminAccess
+
+        if (adminAccessRecord?.adminRole !== "SUPER_ADMIN") {
             return { success: false, error: "Only super admins can revoke invitations" }
         }
 
-        await prisma.adminInvitation.update({
-            where: { id: invitationId },
-            data: { status: "REVOKED" }
-        })
+        await db
+            .update(adminInvitation)
+            .set({ status: "REVOKED" })
+            .where(eq(adminInvitation.id, invitationId))
 
-        await prisma.adminAuditLog.create({
-            data: {
-                adminId: adminAccess.id,
-                action: "DELETE",
-                module: "admin_management",
-                resourceType: "AdminInvitation",
-                resourceId: invitationId,
-                description: "Revoked admin invitation"
-            }
+        await db.insert(adminAuditLog).values({
+            adminId: adminAccessRecord.id,
+            action: "DELETE",
+            module: "admin_management",
+            resourceType: "AdminInvitation",
+            resourceId: invitationId,
+            description: "Revoked admin invitation",
+            createdAt: new Date(),
         })
 
         revalidatePath("/admins/invitations")
@@ -370,31 +378,33 @@ export async function revokeInvitation(invitationId: string): Promise<AdminRespo
 }
 
 // Update admin status
-export async function updateAdminStatus(adminId: string, status: "ACTIVE" | "INACTIVE" | "SUSPENDED"): Promise<AdminResponse> {
+export async function updateAdminStatus(
+    adminId: string,
+    status: "ACTIVE" | "INACTIVE" | "SUSPENDED",
+): Promise<AdminResponse> {
     try {
         const accessCheck = await checkAdminAccess()
         if (!accessCheck.success) return { success: false, error: accessCheck.error }
 
-        const adminAccess = accessCheck.data?.adminAccess
-        
-        if (adminAccess.adminRole !== "SUPER_ADMIN") {
+        const adminAccessRecord = accessCheck.data?.adminAccess
+
+        if (adminAccessRecord?.adminRole !== "SUPER_ADMIN") {
             return { success: false, error: "Only super admins can update admin status" }
         }
 
-        await prisma.adminAccess.update({
-            where: { id: adminId },
-            data: { status }
-        })
+        await db
+            .update(adminAccess)
+            .set({ status, updatedAt: new Date() })
+            .where(eq(adminAccess.id, adminId))
 
-        await prisma.adminAuditLog.create({
-            data: {
-                adminId: adminAccess.id,
-                action: "UPDATE",
-                module: "admin_management",
-                resourceType: "AdminAccess",
-                resourceId: adminId,
-                description: `Updated admin status to ${status}`
-            }
+        await db.insert(adminAuditLog).values({
+            adminId: adminAccessRecord.id,
+            action: "UPDATE",
+            module: "admin_management",
+            resourceType: "AdminAccess",
+            resourceId: adminId,
+            description: `Updated admin status to ${status}`,
+            createdAt: new Date(),
         })
 
         revalidatePath("/admins")
@@ -407,39 +417,38 @@ export async function updateAdminStatus(adminId: string, status: "ACTIVE" | "INA
 }
 
 // Update admin permissions
-export async function updateAdminPermissions(adminId: string, permissions: Record<string, string[]>): Promise<AdminResponse> {
+export async function updateAdminPermissions(
+    adminId: string,
+    permissions: Record<string, string[]>,
+): Promise<AdminResponse> {
     try {
         const accessCheck = await checkAdminAccess()
         if (!accessCheck.success) return { success: false, error: accessCheck.error }
 
-        const adminAccess = accessCheck.data?.adminAccess
-        
-        if (adminAccess.adminRole !== "SUPER_ADMIN") {
+        const adminAccessRecord = accessCheck.data?.adminAccess
+
+        if (adminAccessRecord?.adminRole !== "SUPER_ADMIN") {
             return { success: false, error: "Only super admins can update permissions" }
         }
 
-        const previousAdmin = await prisma.adminAccess.findUnique({
-            where: { id: adminId }
+        const previousAdmin = await db.query.adminAccess.findFirst({
+            where: (a, { eq }) => eq(a.id, adminId),
         })
 
-        await prisma.adminAccess.update({
-            where: { id: adminId },
-            data: { permissions }
-        })
+        await db
+            .update(adminAccess)
+            .set({ permissions, updatedAt: new Date() })
+            .where(eq(adminAccess.id, adminId))
 
-        await prisma.adminAuditLog.create({
-            data: {
-                adminId: adminAccess.id,
-                action: "UPDATE",
-                module: "admin_management",
-                resourceType: "AdminAccess",
-                resourceId: adminId,
-                description: `Updated admin permissions`,
-                changes: {
-                    before: previousAdmin?.permissions,
-                    after: permissions
-                }
-            }
+        await db.insert(adminAuditLog).values({
+            adminId: adminAccessRecord.id,
+            action: "UPDATE",
+            module: "admin_management",
+            resourceType: "AdminAccess",
+            resourceId: adminId,
+            description: "Updated admin permissions",
+            changes: { before: previousAdmin?.permissions, after: permissions },
+            createdAt: new Date(),
         })
 
         revalidatePath("/admins")
@@ -459,54 +468,30 @@ export async function getDashboardStats(): Promise<AdminResponse<any>> {
 
         const now = new Date()
         const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-        const today = new Date(now.setHours(0, 0, 0, 0))
+        const today = new Date(now)
+        today.setHours(0, 0, 0, 0)
 
-        const [
-            totalUsers,
-            newUsersThisMonth,
-            totalAdmins
-        ] = await Promise.all([
-            prisma.user.count(),
-            prisma.user.count({
-                where: { 
-                    createdAt: { 
-                        gte: thirtyDaysAgo 
-                    } 
-                }
-            }),
-            prisma.adminAccess.count({
-                where: { 
-                    status: "ACTIVE" 
-                }
-            })
-        ])
-
-        // Get active users today based on createdAt
-        const activeToday = await prisma.user.count({
-            where: { createdAt: { gte: today } }
-        })
-
-        // Calculate total credits (using xp balance from users)
-        let totalCredits = 0
-        try {
-            const xpSum = await prisma.user.aggregate({
-                _sum: { currentXp: true }
-            })
-            totalCredits = xpSum._sum.currentXp || 0
-        } catch {
-            // XP model might not exist or have different fields
-        }
+        const [[totalUsersResult], [newUsersResult], [totalAdminsResult], [activeTodayResult]] =
+            await Promise.all([
+                db.select({ count: count() }).from(user),
+                db.select({ count: count() }).from(user).where(gte(user.createdAt, thirtyDaysAgo)),
+                db.select({ count: count() }).from(adminAccess).where(eq(adminAccess.status, "ACTIVE")),
+                db.select({ count: count() }).from(user).where(gte(user.createdAt, today)),
+            ])
 
         return {
             success: true,
             data: {
-                totalUsers,
-                newUsersThisMonth,
-                activeToday,
-                totalAdmins,
-                totalCredits,
-                growthRate: totalUsers > 0 ? Math.round((newUsersThisMonth / totalUsers) * 100) : 0
-            }
+                totalUsers: totalUsersResult?.count ?? 0,
+                newUsersThisMonth: newUsersResult?.count ?? 0,
+                activeToday: activeTodayResult?.count ?? 0,
+                totalAdmins: totalAdminsResult?.count ?? 0,
+                totalCredits: 0,
+                growthRate:
+                    (totalUsersResult?.count ?? 0) > 0
+                        ? Math.round(((newUsersResult?.count ?? 0) / (totalUsersResult?.count ?? 1)) * 100)
+                        : 0,
+            },
         }
     } catch (error) {
         console.error("Get dashboard stats error:", error)
@@ -515,34 +500,31 @@ export async function getDashboardStats(): Promise<AdminResponse<any>> {
 }
 
 // Get audit logs
-export async function getAuditLogs(page: number = 1, limit: number = 20): Promise<AdminResponse<any>> {
+export async function getAuditLogs(page = 1, limit = 20): Promise<AdminResponse<any>> {
     try {
         const { success, error } = await checkAdminAccess()
         if (!success) return { success: false, error }
 
-        const [logs, total] = await Promise.all([
-            prisma.adminAuditLog.findMany({
-                take: limit,
-                skip: (page - 1) * limit,
-                orderBy: { createdAt: "desc" },
-                include: {
-                    admin: {
-                        select: { userId: true }
-                    }
-                }
+        const [logs, [totalResult]] = await Promise.all([
+            db.query.adminAuditLog.findMany({
+                limit,
+                offset: (page - 1) * limit,
+                orderBy: [desc(adminAuditLog.createdAt)],
+                with: { admin: { columns: { userId: true } } },
             }),
-            prisma.adminAuditLog.count()
+            db.select({ count: count() }).from(adminAuditLog),
         ])
 
-        // Get user details for each log
+        const total = totalResult?.count ?? 0
+
         const logsWithUser = await Promise.all(
             logs.map(async (log) => {
-                const user = await prisma.user.findUnique({
-                    where: { id: log.admin.userId },
-                    select: { name: true, email: true, image: true }
+                const userRecord = await db.query.user.findFirst({
+                    where: (u, { eq }) => eq(u.id, log.admin.userId),
+                    columns: { name: true, email: true, image: true },
                 })
-                return { ...log, adminUser: user }
-            })
+                return { ...log, adminUser: userRecord }
+            }),
         )
 
         return {
@@ -551,8 +533,8 @@ export async function getAuditLogs(page: number = 1, limit: number = 20): Promis
                 logs: logsWithUser,
                 total,
                 pages: Math.ceil(total / limit),
-                currentPage: page
-            }
+                currentPage: page,
+            },
         }
     } catch (error) {
         console.error("Get audit logs error:", error)
@@ -563,28 +545,27 @@ export async function getAuditLogs(page: number = 1, limit: number = 20): Promis
 // Set admin password (after initial access code login)
 export async function setAdminPassword(newPassword: string): Promise<AdminResponse> {
     try {
-        const session = await getServerSession(authOptions)
-        
+        const session = await getSession()
+
         if (!session?.user?.id) {
             return { success: false, error: "Not authenticated" }
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 12)
 
-        await prisma.adminAccess.update({
-            where: { userId: session.user.id },
-            data: { 
-                hashedPassword,
-                accessCode: null,
-                accessCodeExpiry: null
-            }
-        })
+        // Update in the Better Auth account table
+        await db
+            .update(account)
+            .set({ password: hashedPassword, updatedAt: new Date() })
+            .where(
+                and(eq(account.userId, session.user.id), eq(account.providerId, "credential")),
+            )
 
-        // Also update user password
-        await prisma.user.update({
-            where: { id: session.user.id },
-            data: { hashedPassword }
-        })
+        // Clear the temporary access code from adminAccess
+        await db
+            .update(adminAccess)
+            .set({ accessCode: null, accessCodeExpiry: null, hashedPassword, updatedAt: new Date() })
+            .where(eq(adminAccess.userId, session.user.id))
 
         return { success: true }
     } catch (error) {
@@ -594,40 +575,50 @@ export async function setAdminPassword(newPassword: string): Promise<AdminRespon
 }
 
 // Change password with current password verification
-export async function changeAdminPassword(currentPassword: string, newPassword: string): Promise<AdminResponse> {
+export async function changeAdminPassword(
+    currentPassword: string,
+    newPassword: string,
+): Promise<AdminResponse> {
     try {
-        const session = await getServerSession(authOptions)
+        const session = await getSession()
         if (!session?.user?.id) {
             return { success: false, error: "Not authenticated" }
         }
 
-        const user = await prisma.user.findUnique({
-            where: { id: session.user.id },
-            select: { id: true, hashedPassword: true }
+        const credentialAccount = await db.query.account.findFirst({
+            where: (a, { and, eq }) =>
+                and(eq(a.userId, session.user.id), eq(a.providerId, "credential")),
         })
-        if (!user || !user.hashedPassword) {
-            return { success: false, error: "User not found" }
+
+        if (!credentialAccount?.password) {
+            return { success: false, error: "No password set for this account" }
         }
 
-        const valid = await bcrypt.compare(currentPassword, user.hashedPassword)
+        const valid = await bcrypt.compare(currentPassword, credentialAccount.password)
         if (!valid) {
             return { success: false, error: "Current password is incorrect" }
         }
 
         const hashedNew = await bcrypt.hash(newPassword, 12)
-        await prisma.user.update({ where: { id: user.id }, data: { hashedPassword: hashedNew } })
 
-        const adminAccess = await prisma.adminAccess.findUnique({ where: { userId: user.id } })
-        if (adminAccess) {
-            await prisma.adminAuditLog.create({
-                data: {
-                    adminId: adminAccess.id,
-                    action: "UPDATE",
-                    module: "admin_management",
-                    resourceType: "User",
-                    resourceId: user.id,
-                    description: "Changed password"
-                }
+        await db
+            .update(account)
+            .set({ password: hashedNew, updatedAt: new Date() })
+            .where(eq(account.id, credentialAccount.id))
+
+        const adminAccessRecord = await db.query.adminAccess.findFirst({
+            where: (a, { eq }) => eq(a.userId, session.user.id),
+        })
+
+        if (adminAccessRecord) {
+            await db.insert(adminAuditLog).values({
+                adminId: adminAccessRecord.id,
+                action: "UPDATE",
+                module: "admin_management",
+                resourceType: "User",
+                resourceId: session.user.id,
+                description: "Changed password",
+                createdAt: new Date(),
             })
         }
 

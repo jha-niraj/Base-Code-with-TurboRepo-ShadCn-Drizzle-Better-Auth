@@ -29,7 +29,7 @@ export function AdminSidebar() {
     const [expandedItems, setExpandedItems] = useState<string[]>([])
     const pathname = usePathname()
     const router = useRouter()
-    const { data: session, status } = useSession()
+    const { data: session, isPending } = useSession()
     const profileTimeoutRef = useRef<NodeJS.Timeout | null>(null)
     const [profileDropdownOpen, setProfileDropdownOpen] = useState(false)
 
@@ -69,7 +69,7 @@ export function AdminSidebar() {
     }
 
     const handleSignOut = async () => {
-        await signOut({ callbackUrl: "/" })
+        await signOut()
         setProfileDropdownOpen(false)
         toast.success("Logged out", {
             description: "You have been signed out of the admin panel"
@@ -221,7 +221,7 @@ export function AdminSidebar() {
             <div className="mt-auto border-t border-neutral-200 dark:border-neutral-800">
                 <ThemeToggle />
                 {
-                    status === "authenticated" && session ? (
+                    !isPending && session ? (
                         <div
                             className="relative px-3 py-2"
                             onMouseEnter={handleProfileMouseEnter}

@@ -8,12 +8,8 @@
 		"format": "prettier --write \"**/*.{ts,tsx,md}\"",
 		"check-types": "turbo run check-types"
 	},
-	"prisma": {
-		"schema": "./packages/prisma/schema"
-	},
 	"devDependencies": {
 		"prettier": "^3.7.4",
-		"prisma": "6.14.0",
 		"turbo": "^2.6.3",
 		"typescript": "5.9.2"
 	},

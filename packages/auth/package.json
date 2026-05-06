@@ -7,20 +7,16 @@
 	"types": "./src/index.ts",
 	"exports": {
 		".": "./src/index.ts",
-		"./config": "./src/auth.ts",
-		"./types": "./src/next-auth.d.ts",
-		"./middleware": "./src/middleware.ts",
-		"./client": "./src/client.ts"
+		"./client": "./src/client.ts",
+		"./middleware": "./src/middleware.ts"
 	},
 	"scripts": {
 		"lint": "eslint . --max-warnings 0",
 		"type-check": "tsc --noEmit"
 	},
 	"dependencies": {
-		"next-auth": "^4.24.13",
-		"@next-auth/prisma-adapter": "^1.0.7",
-		"@repo/prisma": "workspace:*",
-		"bcryptjs": "^3.0.3"
+		"@repo/db": "workspace:*",
+		"better-auth": "^1.2.9"
 	},
 	"peerDependencies": {
 		"next": ">=14.0.0",
@@ -28,7 +24,6 @@
 		"react-dom": ">=18.0.0"
 	},
 	"devDependencies": {
-		"@types/bcryptjs": "^2.4.6",
 		"@types/node": "^22.15.3",
 		"typescript": "^5.9.2"
 	}

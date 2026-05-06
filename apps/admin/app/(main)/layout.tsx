@@ -12,17 +12,17 @@ import { Loader2 } from "lucide-react"
 
 function AdminLayoutContent({ children }: { children: React.ReactNode }) {
     const { isCollapsed } = useSidebar()
-    const { data: session, status } = useSession()
+    const { data: session, isPending } = useSession()
     const router = useRouter()
 
     // Redirect to signin if not authenticated
     useEffect(() => {
-        if (status === "unauthenticated") {
+        if (!isPending && !session) {
             router.push("/")
         }
-    }, [status, router])
+    }, [isPending, session, router])
 
-    if (status === "loading") {
+    if (isPending) {
         return (
             <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 flex items-center justify-center">
                 <Loader2 className="w-8 h-8 animate-spin text-neutral-400" />

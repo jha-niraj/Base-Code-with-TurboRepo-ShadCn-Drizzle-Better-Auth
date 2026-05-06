@@ -8,12 +8,11 @@
 		"build": "next build",
 		"start": "next start",
 		"lint": "eslint --max-warnings 0",
-		"check-types": "next typegen && tsc --noEmit"
+		"check-types": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@prisma/client": "6.14.0",
 		"@repo/auth": "workspace:*",
-		"@repo/prisma": "workspace:*",
+		"@repo/db": "workspace:*",
 		"@repo/ui": "workspace:*",
 		"bcryptjs": "^3.0.3",
 		"framer-motion": "^12.23.26",
@@ -25,6 +24,7 @@
 	"devDependencies": {
 		"@repo/eslint-config": "workspace:*",
 		"@repo/typescript-config": "workspace:*",
+		"@types/bcryptjs": "^2.4.6",
 		"@types/node": "^22.15.3",
 		"@types/react": "19.2.2",
 		"@types/react-dom": "19.2.2",
